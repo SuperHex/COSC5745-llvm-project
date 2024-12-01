@@ -25,9 +25,37 @@
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
+void* __page_aligned_malloc() {
+    size_t page_size = sysconf(_SC_PAGESIZE); // Get the system's page size
+    void* aligned_memory = nullptr;
+
+    // Allocate memory aligned to the page size
+    if (posix_memalign(&aligned_memory, page_size, page_size) != 0) {
+        __throw_bad_shared_ptr_access();
+    }
+
+    return aligned_memory;
+}
+
+void __mprotect_set(void *ptr, int permission) {
+    size_t page_size = sysconf(_SC_PAGESIZE); // Get the system's page size
+    // Skip un-aligned memory region
+    if ((reinterpret_cast<uintptr_t>(ptr) % page_size) != 0) {
+        return;
+    }
+    if (mprotect(ptr, page_size, permission) != 0) {
+        free(ptr);
+        __throw_bad_shared_ptr_access();
+    }
+}
+
 bad_weak_ptr::~bad_weak_ptr() noexcept {}
 
 const char* bad_weak_ptr::what() const noexcept { return "bad_weak_ptr"; }
+
+bad_shared_ptr_access::~bad_shared_ptr_access() noexcept {}
+
+const char* bad_shared_ptr_access::what() const noexcept { return "Invalid shared_ptr metadata access"; }
 
 __shared_count::~__shared_count() {}
 

@@ -62,6 +62,10 @@
 #  include <__atomic/memory_order.h>
 #endif
 
+#include <unistd.h>    // For sysconf
+#include <sys/mman.h> // For mprotect
+#include <cstdlib>
+
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #  pragma GCC system_header
 #endif
@@ -87,6 +91,24 @@ public:
   _LIBCPP_VERBOSE_ABORT("bad_weak_ptr was thrown in -fno-exceptions mode");
 #endif
 }
+
+class _LIBCPP_EXPORTED_FROM_ABI bad_shared_ptr_access : public std::exception {
+public:
+  _LIBCPP_HIDE_FROM_ABI bad_shared_ptr_access() _NOEXCEPT                               = default;
+  _LIBCPP_HIDE_FROM_ABI bad_shared_ptr_access(const bad_shared_ptr_access&) _NOEXCEPT            = default;
+  _LIBCPP_HIDE_FROM_ABI bad_shared_ptr_access& operator=(const bad_shared_ptr_access&) _NOEXCEPT = default;
+  ~bad_shared_ptr_access() _NOEXCEPT override;
+  const char* what() const _NOEXCEPT override;
+};
+
+[[__noreturn__]] inline _LIBCPP_HIDE_FROM_ABI void __throw_bad_shared_ptr_access() {
+#if _LIBCPP_HAS_EXCEPTIONS
+  throw bad_shared_ptr_access();
+#else
+  _LIBCPP_VERBOSE_ABORT("bad_shared_ptr_access was thrown in -fno-exceptions mode");
+#endif
+}
+
 
 template <class _Tp>
 class _LIBCPP_TEMPLATE_VIS weak_ptr;
@@ -301,6 +323,9 @@ using __shared_ptr_nullptr_deleter_ctor_reqs = _And<is_move_constructible<_Dp>, 
 #  define _LIBCPP_SHARED_PTR_TRIVIAL_ABI
 #endif
 
+void* __page_aligned_malloc();
+void  __mprotect_set(void *ptr, int permission);
+
 template <class _Tp>
 class _LIBCPP_SHARED_PTR_TRIVIAL_ABI _LIBCPP_TEMPLATE_VIS shared_ptr {
   struct __nullptr_sfinae_tag {};
@@ -341,7 +366,11 @@ public:
     unique_ptr<_Yp> __hold(__p);
     typedef typename __shared_ptr_default_allocator<_Yp>::type _AllocT;
     typedef __shared_ptr_pointer<_Yp*, __shared_ptr_default_delete<_Tp, _Yp>, _AllocT> _CntrlBlk;
-    __cntrl_ = new _CntrlBlk(__p, __shared_ptr_default_delete<_Tp, _Yp>(), _AllocT());
+
+    void *__mem = __page_aligned_malloc();
+    __cntrl_ = new (__mem) _CntrlBlk(__p, __shared_ptr_default_delete<_Tp, _Yp>(), _AllocT());
+    __mprotect_set(__mem, PROT_READ);
+    
     __hold.release();
     __enable_weak_this(__p, __p);
   }
@@ -353,11 +382,15 @@ public:
 #endif // _LIBCPP_HAS_EXCEPTIONS
       typedef typename __shared_ptr_default_allocator<_Yp>::type _AllocT;
       typedef __shared_ptr_pointer<_Yp*, _Dp, _AllocT> _CntrlBlk;
+
+      void *__mem = __page_aligned_malloc();
 #ifndef _LIBCPP_CXX03_LANG
-      __cntrl_ = new _CntrlBlk(__p, std::move(__d), _AllocT());
+      __cntrl_ = new (__mem) _CntrlBlk(__p, std::move(__d), _AllocT());
 #else
-    __cntrl_ = new _CntrlBlk(__p, __d, _AllocT());
+      __cntrl_ = new (__mem) _CntrlBlk(__p, __d, _AllocT());
 #endif // not _LIBCPP_CXX03_LANG
+      __mprotect_set(__mem, PROT_READ);
+      
       __enable_weak_this(__p, __p);
 #if _LIBCPP_HAS_EXCEPTIONS
     } catch (...) {
@@ -407,11 +440,15 @@ public:
 #endif // _LIBCPP_HAS_EXCEPTIONS
       typedef typename __shared_ptr_default_allocator<_Tp>::type _AllocT;
       typedef __shared_ptr_pointer<nullptr_t, _Dp, _AllocT> _CntrlBlk;
+
+      void *__mem = __page_aligned_malloc();
 #ifndef _LIBCPP_CXX03_LANG
-      __cntrl_ = new _CntrlBlk(__p, std::move(__d), _AllocT());
+      __cntrl_ = new (__mem) _CntrlBlk(__p, std::move(__d), _AllocT());
 #else
-    __cntrl_ = new _CntrlBlk(__p, __d, _AllocT());
+      __cntrl_ = new (__mem) _CntrlBlk(__p, __d, _AllocT());
 #endif // not _LIBCPP_CXX03_LANG
+      __mprotect_set(__mem, PROT_READ);
+      
 #if _LIBCPP_HAS_EXCEPTIONS
     } catch (...) {
       __d(__p);
@@ -454,8 +491,11 @@ public:
   _LIBCPP_HIDE_FROM_ABI shared_ptr(const shared_ptr<_Yp>& __r, element_type* __p) _NOEXCEPT
       : __ptr_(__p),
         __cntrl_(__r.__cntrl_) {
-    if (__cntrl_)
-      __cntrl_->__add_shared();
+      if (__cntrl_) {
+          __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+          __cntrl_->__add_shared();
+          __mprotect_set(__cntrl_, PROT_READ);
+      }
   }
 
 // LWG-2996
@@ -470,14 +510,20 @@ public:
 #endif
 
   _LIBCPP_HIDE_FROM_ABI shared_ptr(const shared_ptr& __r) _NOEXCEPT : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_) {
-    if (__cntrl_)
-      __cntrl_->__add_shared();
+      if (__cntrl_) {
+          __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+          __cntrl_->__add_shared();
+          __mprotect_set(__cntrl_, PROT_READ);
+      }
   }
 
   template <class _Yp, __enable_if_t<__compatible_with<_Yp, _Tp>::value, int> = 0>
   _LIBCPP_HIDE_FROM_ABI shared_ptr(const shared_ptr<_Yp>& __r) _NOEXCEPT : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_) {
-    if (__cntrl_)
-      __cntrl_->__add_shared();
+      if (__cntrl_) {
+          __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+          __cntrl_->__add_shared();
+          __mprotect_set(__cntrl_, PROT_READ);
+      }
   }
 
   _LIBCPP_HIDE_FROM_ABI shared_ptr(shared_ptr&& __r) _NOEXCEPT : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_) {
@@ -493,16 +539,25 @@ public:
 
   template <class _Yp, __enable_if_t<__compatible_with<_Yp, _Tp>::value, int> = 0>
   _LIBCPP_HIDE_FROM_ABI explicit shared_ptr(const weak_ptr<_Yp>& __r)
-      : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_ ? __r.__cntrl_->lock() : __r.__cntrl_) {
-    if (__cntrl_ == nullptr)
-      __throw_bad_weak_ptr();
+      : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_) {
+      if (__r.__cntrl_) {
+          __mprotect_set(__r.__cntrl_, PROT_READ | PROT_WRITE);
+          __cntrl_ = __r.__cntrl_->lock();
+          __mprotect_set(__cntrl_, PROT_READ);
+      }
+      if (__cntrl_ == nullptr)
+          __throw_bad_weak_ptr();
   }
 
 #if _LIBCPP_STD_VER <= 14 || defined(_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR)
   template <class _Yp, __enable_if_t<is_convertible<_Yp*, element_type*>::value, int> = 0>
   _LIBCPP_HIDE_FROM_ABI shared_ptr(auto_ptr<_Yp>&& __r) : __ptr_(__r.get()) {
     typedef __shared_ptr_pointer<_Yp*, default_delete<_Yp>, allocator<__remove_cv_t<_Yp> > > _CntrlBlk;
-    __cntrl_ = new _CntrlBlk(__r.get(), default_delete<_Yp>(), allocator<__remove_cv_t<_Yp> >());
+
+    void *__mem = __page_aligned_malloc();
+    __cntrl_ = new (__mem) _CntrlBlk(__r.get(), default_delete<_Yp>(), allocator<__remove_cv_t<_Yp> >());
+    __mprotect_set(__mem, PROT_READ);
+    
     __enable_weak_this(__r.get(), __r.get());
     __r.release();
   }
@@ -522,7 +577,11 @@ public:
     {
       typedef typename __shared_ptr_default_allocator<_Yp>::type _AllocT;
       typedef __shared_ptr_pointer<typename unique_ptr<_Yp, _Dp>::pointer, _Dp, _AllocT> _CntrlBlk;
-      __cntrl_ = new _CntrlBlk(__r.get(), std::move(__r.get_deleter()), _AllocT());
+
+      void *__mem = __page_aligned_malloc();
+      __cntrl_ = new (__mem) _CntrlBlk(__r.get(), std::move(__r.get_deleter()), _AllocT());
+      __mprotect_set(__mem, PROT_READ);
+      
       __enable_weak_this(__r.get(), __r.get());
     }
     __r.release();
@@ -546,15 +605,22 @@ public:
                                    reference_wrapper<__libcpp_remove_reference_t<_Dp> >,
                                    _AllocT>
           _CntrlBlk;
-      __cntrl_ = new _CntrlBlk(__r.get(), std::ref(__r.get_deleter()), _AllocT());
+
+      void *__mem = __page_aligned_malloc();
+      __cntrl_ = new (__mem) _CntrlBlk(__r.get(), std::ref(__r.get_deleter()), _AllocT());
+      __mprotect_set(__mem, PROT_READ);
+      
       __enable_weak_this(__r.get(), __r.get());
     }
     __r.release();
   }
 
   _LIBCPP_HIDE_FROM_ABI ~shared_ptr() {
-    if (__cntrl_)
-      __cntrl_->__release_shared();
+      if (__cntrl_) {
+          __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+          __cntrl_->__release_shared();
+          __mprotect_set(__cntrl_, PROT_READ);
+      }
   }
 
   _LIBCPP_HIDE_FROM_ABI shared_ptr<_Tp>& operator=(const shared_ptr& __r) _NOEXCEPT {
@@ -1276,15 +1342,21 @@ inline _LIBCPP_CONSTEXPR weak_ptr<_Tp>::weak_ptr() _NOEXCEPT : __ptr_(nullptr), 
 
 template <class _Tp>
 inline weak_ptr<_Tp>::weak_ptr(weak_ptr const& __r) _NOEXCEPT : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_) {
-  if (__cntrl_)
-    __cntrl_->__add_weak();
+    if (__cntrl_) {
+        __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+        __cntrl_->__add_weak();
+        __mprotect_set(__cntrl_, PROT_READ);
+    }
 }
 
 template <class _Tp>
 template <class _Yp, __enable_if_t<__compatible_with<_Yp, _Tp>::value, int> >
 inline weak_ptr<_Tp>::weak_ptr(shared_ptr<_Yp> const& __r) _NOEXCEPT : __ptr_(__r.__ptr_), __cntrl_(__r.__cntrl_) {
-  if (__cntrl_)
-    __cntrl_->__add_weak();
+    if (__cntrl_) {
+        __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+        __cntrl_->__add_weak();
+        __mprotect_set(__cntrl_, PROT_READ);
+    }
 }
 
 template <class _Tp>
@@ -1310,8 +1382,11 @@ inline weak_ptr<_Tp>::weak_ptr(weak_ptr<_Yp>&& __r) _NOEXCEPT : __ptr_(nullptr),
 
 template <class _Tp>
 weak_ptr<_Tp>::~weak_ptr() {
-  if (__cntrl_)
-    __cntrl_->__release_weak();
+    if (__cntrl_) {
+        __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+        __cntrl_->__release_weak();
+        __mprotect_set(__cntrl_, PROT_READ);
+    }
 }
 
 template <class _Tp>
@@ -1366,7 +1441,16 @@ inline void weak_ptr<_Tp>::reset() _NOEXCEPT {
 template <class _Tp>
 shared_ptr<_Tp> weak_ptr<_Tp>::lock() const _NOEXCEPT {
   shared_ptr<_Tp> __r;
-  __r.__cntrl_ = __cntrl_ ? __cntrl_->lock() : __cntrl_;
+  
+  if (__cntrl_) {
+      __mprotect_set(__cntrl_, PROT_READ | PROT_WRITE);
+      __r.__cntrl_ = __cntrl_->lock();
+      __mprotect_set(__cntrl_, PROT_READ);
+  }
+  else {
+      __r.__cntrl_ = __cntrl_;
+  }
+  
   if (__r.__cntrl_)
     __r.__ptr_ = __ptr_;
   return __r;
